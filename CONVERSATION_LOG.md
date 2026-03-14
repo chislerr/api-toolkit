@@ -116,7 +116,14 @@
     - Created the `POST /tools/html-to-markdown` endpoint alongside the OG image tool.
     - Verified functionality locally (successfully extracted ~30,000 characters of clean markdown from a cluttered Zapier blog post).
     - Deployed to the Render production server.
+20. **User Decision**: The user requested to pause the session to wait for the browser automation rate limits to reset before tackling ApyHub. 
+    - Fixed an unnecessary local import in `routers/tools.py` and successfully pushed to Render so the production server idles perfectly.
 
-**Current Status**: Awaiting the user's manual review of the new endpoint, and awaiting instructions on whether to continue building Idea #3 (Hyper-Local SEO Brief Generator API) or to perform manual testing on Swagger UI first.
+**Current Status (PAUSED)**: 
+The session is paused until rate limits reset.
+When resumed, the AI Agent must execute the following immediate steps:
+1. Use the browser subagent to post the **Dynamic OG Image API** to ApyHub.
+2. Use the browser subagent to post the **Clean HTML to Markdown API** to ApyHub.
+3. Once listed, begin planning **Idea #3: Hyper-Local SEO Brief Generator API**.
 
 
