@@ -5,9 +5,8 @@ from typing import Optional
 
 from services.og_image import generate_og_image
 from services.html_to_md import extract_markdown_from_url
-from core.middleware import verify_api_key
 
-router = APIRouter(dependencies=[Depends(verify_api_key)])
+router = APIRouter()
 
 class OGImageRequest(BaseModel):
     title: str = Field(..., description="The main headline for the OG image")
