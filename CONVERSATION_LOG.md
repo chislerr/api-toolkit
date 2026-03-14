@@ -110,7 +110,13 @@
 16. Started Planning the **HTML to Markdown API**. Created `implementation_plan.md` detailing the use of `readability-lxml` to extract article bodies, and `markdownify` to convert the HTML to clean Markdown.
 17. **User Request**: Before proceeding with building the HTML to Markdown API, the user requested an estimation of potential income and a realistic timeline for their first year as an API provider.
 18. Researched realistic MRR (Monthly Recurring Revenue) timelines for solo developers and indie hackers. Created `api_revenue_projections.md`, detailing a month-by-month breakdown of expected revenue, from the initial "Trough of Sorrow" (Months 1-3 at $0-$300 MRR) to potential sustainability (Month 12 at $5k+ MRR). 
+19. **Implementation: Clean HTML to Markdown API**: The user approved the plan and projections. 
+    - Added `markdownify` to dependencies.
+    - Wrote core extraction logic in `services/html_to_md.py` parsing the dom via `readability` and converting to token-efficient markdown via `markdownify`.
+    - Created the `POST /tools/html-to-markdown` endpoint alongside the OG image tool.
+    - Verified functionality locally (successfully extracted ~30,000 characters of clean markdown from a cluttered Zapier blog post).
+    - Deployed to the Render production server.
 
-**Current Status**: Awaiting user review of the revenue projections and final go-ahead on the `implementation_plan.md` for the HTML to Markdown API so we can begin coding.
+**Current Status**: Awaiting the user's manual review of the new endpoint, and awaiting instructions on whether to continue building Idea #3 (Hyper-Local SEO Brief Generator API) or to perform manual testing on Swagger UI first.
 
 
