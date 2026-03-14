@@ -96,7 +96,8 @@
    - **Data Extractor API**: Added 3 endpoints (Article, E-commerce, Real Estate extraction).
    - **PDF Converter API**: Added 2 endpoints (PDF from HTML, PDF from URL).
 8. Conducted deep research comparing ApyHub marketplace revenue (~80% take-home, hands-off) vs Self-Hosted Stripe Portal (~97% take-home, requires building full auth/gateway/billing stack). Wrote analysis to `monetization_research.md`.
+9. Researched the most profitable API categories for solo developers and indie hackers. Focused on B2B micro-niche APIs, AI automation (like alt-text generation), and data integration APIs (like competitor pricing tracking). Saved research to `api_ideas_research.md`.
 
-**Next Steps**: Wait for ApyHub approval for all 3 APIs, then connect Stripe and configure pricing. If high volume is achieved, consider building the self-hosted portal using Supabase.
+**Next Steps**: Wait for ApyHub approval for all 3 APIs, then connect Stripe and configure pricing. Decide on the next micro-niche API to build or begin planning the Pomodoro Focus App.
 
 
