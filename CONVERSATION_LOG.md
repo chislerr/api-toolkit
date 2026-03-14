@@ -106,7 +106,9 @@
     - Created the `routers/tools.py` endpoint `POST /tools/og-image`.
     - Deployed to Render and successfully verified it generates raw `.png` responses in production.
 14. Attempted to upload the new API to the ApyHub marketplace using the browser automation subagent, but encountered a quota limit ("RESOURCE_EXHAUSTED for the browser model"). The ApyHub submission must be done manually by the user or deferred until the quota resets.
+15. **User Decision**: Postpone ApyHub listing until later and immediately pivot to building **Idea #2: The 'Clean' HTML to Markdown API for LLMs**.
+16. Started Planning the **HTML to Markdown API**. Created `implementation_plan.md` detailing the use of `readability-lxml` to extract article bodies, and `markdownify` to convert the HTML to clean Markdown.
 
-**Next Steps**: Decide whether the user wants to manually submit the OG Image API to ApyHub using `https://api-toolkit-yb1l.onrender.com/openapi.json`, or if we should immediately begin building the next API on the list (e.g., "Clean HTML to Markdown API").
+**Current Status**: Awaiting user approval on the `implementation_plan.md` for the HTML to Markdown API so we can begin code execution and installation of `markdownify`.
 
 
