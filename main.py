@@ -74,6 +74,10 @@ app.include_router(pdf_router, prefix="/pdf", tags=["PDF Converter"])
 app.include_router(extract_router, prefix="/extract", tags=["Data Extractor"])
 app.include_router(intel_router, prefix="/intel", tags=["Website Intelligence"])
 
+# Import here to avoid circular dependencies if we move things, but better to import at top
+from routers.tools import router as tools_router
+app.include_router(tools_router, prefix="/tools", tags=["Developer Tools"])
+
 
 # ─── Root & Health ───────────────────────────────────────────────
 
