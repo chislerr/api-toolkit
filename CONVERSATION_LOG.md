@@ -58,3 +58,23 @@
 **Swagger Docs**: https://api-toolkit-yb1l.onrender.com/docs
 
 **Next Steps**: RapidAPI listing → own portal with Stripe billing
+
+## 2026-03-14 (Session 3 cont.): RapidAPI Listing
+
+**User Request**: List APIs on RapidAPI marketplace for monetization.
+
+**Actions Taken**:
+1. Created RapidAPI provider account (via GitHub OAuth)
+2. Created "Website Intelligence API" project in Studio
+3. Set base URL to `https://api-toolkit-yb1l.onrender.com`
+4. Added 3 POST endpoints: `/intel/techstack`, `/intel/headers`, `/intel/audit`
+5. Configured 3 pricing tiers:
+   - **Free**: $0/mo — 50 requests, 5/min rate limit
+   - **Basic (PRO)**: $9.99/mo — 1,000 requests, 10/min rate limit
+   - **Pro (ULTRA)**: $29.99/mo — 10,000 requests, 30/min rate limit
+6. Confirmed API publishing rights & toggled visibility to **Public**
+7. API is now live and searchable on RapidAPI Hub
+
+**Status**: ✅ API is public on RapidAPI
+**Pending**: Link payout account to receive revenue
+
