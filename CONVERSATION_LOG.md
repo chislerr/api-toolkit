@@ -75,6 +75,25 @@
 6. Confirmed API publishing rights & toggled visibility to **Public**
 7. API is now live and searchable on RapidAPI Hub
 
-**Status**: ✅ API is public on RapidAPI
-**Pending**: Link payout account to receive revenue
+**Status**: ✅ API is private on RapidAPI
+**Pending**: No longer pursuing RapidAPI due to PayPal restrictions
+
+## 2026-03-14 (Session 3 cont.): ApyHub Alternative Listing
+
+**User Request**: Find a RapidAPI alternative that supports non-PayPal payouts (Stripe/Bank Transfer) and allows self-service publishing.
+
+**Actions Taken**:
+1. Made RapidAPI listing "Private"
+2. Researched alternatives: Zyla (PayPal only), APILayer (Removed self-serve publishing)
+3. Verified ApyHub supports Stripe Connect for direct bank payouts
+4. Created provider account on ApyHub via Google OAuth
+5. Completed provider profile: "Website Intelligence"
+6. Submitted "Website Intelligence API" to Service Studio:
+   - Added `POST /intel/techstack` (Mapped to `POST /audit/tech-stack-detection` in submission)
+   - Added `POST /intel/headers` (Mapped to `POST /audit/security-headers`)
+   - Added `POST /intel/audit` (Mapped to `POST /audit/full`)
+7. API was successfully submitted and is currently in the **"Under Review"** queue on ApyHub.
+
+**Next Steps**: Wait for ApyHub approval, connect Stripe account, then configure pricing.
+
 
