@@ -92,8 +92,11 @@
    - Added `POST /intel/techstack` (Mapped to `POST /audit/tech-stack-detection` in submission)
    - Added `POST /intel/headers` (Mapped to `POST /audit/security-headers`)
    - Added `POST /intel/audit` (Mapped to `POST /audit/full`)
-7. API was successfully submitted and is currently in the **"Under Review"** queue on ApyHub.
+7. Submitted the two remaining APIs to ApyHub:
+   - **Data Extractor API**: Added 3 endpoints (Article, E-commerce, Real Estate extraction).
+   - **PDF Converter API**: Added 2 endpoints (PDF from HTML, PDF from URL).
+8. Conducted deep research comparing ApyHub marketplace revenue (~80% take-home, hands-off) vs Self-Hosted Stripe Portal (~97% take-home, requires building full auth/gateway/billing stack). Wrote analysis to `monetization_research.md`.
 
-**Next Steps**: Wait for ApyHub approval, connect Stripe account, then configure pricing.
+**Next Steps**: Wait for ApyHub approval for all 3 APIs, then connect Stripe and configure pricing. If high volume is achieved, consider building the self-hosted portal using Supabase.
 
 
