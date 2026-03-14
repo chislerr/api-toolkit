@@ -37,3 +37,24 @@
 5. All endpoints confirmed working — proceeding to deployment setup
 
 **Next Steps**: Git init → GitHub push → Deploy to Render
+
+## 2026-03-14 (Session 3): Render Deployment
+
+**User Request**: Continue where we left off — deploy to Render.
+
+**Actions Taken**:
+1. Verified git status — clean, already pushed to `origin/main` at `chislerr/api-toolkit`
+2. Reviewed `render.yaml`, `Dockerfile`, and `.env.example` — all deployment-ready
+3. Signed into Render (new account), skipped onboarding survey
+4. Created Web Service via **Blueprint deployment** using `render.yaml`
+5. Connected public GitHub repo `https://github.com/chislerr/api-toolkit.git`
+6. Docker build completed (Python 3.12-slim + Playwright Chromium)
+7. Verified live deployment:
+   - `GET /health` → `{"status": "healthy"}` ✅
+   - `GET /` → `{"name": "API Toolkit", "version": "1.0.0"}` ✅
+   - Swagger UI at `/docs` — all 9 endpoints visible ✅
+
+**Live URL**: https://api-toolkit-yb1l.onrender.com
+**Swagger Docs**: https://api-toolkit-yb1l.onrender.com/docs
+
+**Next Steps**: RapidAPI listing → own portal with Stripe billing
