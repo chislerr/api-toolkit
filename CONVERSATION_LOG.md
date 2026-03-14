@@ -100,7 +100,13 @@
 10. Conducted deeper research on Reddit (r/SaaS) and IndieHackers to find specific "paid pain" points. Compiled a highly specific list of 10 micro-niche APIs that developers and startups are actively looking to pay for, documented in `10_api_ideas.md`.
 11. **User Decision**: The user requested to proceed with building the APIs from the list one by one, testing, deploying, and uploading them to ApyHub. Crucially, all steps must be thoroughly documented in this log so that future LLM agents can resume seamlessly if context is lost.
 12. Started Planning the **Dynamic Open Graph (OG) Image API** (Idea #1). Created `implementation_plan.md` relying on the `Pillow` Python library for lightweight, memory-safe image generation on Render.
+13. **Implementation: OG Image API**: 
+    - Added `Pillow` to dependencies.
+    - Built text-wrapping and image creation logic in `services/og_image.py`.
+    - Created the `routers/tools.py` endpoint `POST /tools/og-image`.
+    - Deployed to Render and successfully verified it generates raw `.png` responses in production.
+14. Attempted to upload the new API to the ApyHub marketplace using the browser automation subagent, but encountered a quota limit ("RESOURCE_EXHAUSTED for the browser model"). The ApyHub submission must be done manually by the user or deferred until the quota resets.
 
-**Current Status**: Awaiting user approval on the `implementation_plan.md` for the OG Image API so we can begin code execution.
+**Next Steps**: Decide whether the user wants to manually submit the OG Image API to ApyHub using `https://api-toolkit-yb1l.onrender.com/openapi.json`, or if we should immediately begin building the next API on the list (e.g., "Clean HTML to Markdown API").
 
 
