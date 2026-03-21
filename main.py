@@ -7,6 +7,7 @@ from core.middleware import ApiKeyMiddleware, RequestLoggingMiddleware
 from apis.pdf.router import router as pdf_router
 from apis.extract.router import router as extract_router
 from apis.intel.router import router as intel_router
+from routers.tools import router as tools_router
 
 # ─── Logging Config ──────────────────────────────────────────────
 
@@ -73,9 +74,6 @@ app.add_middleware(ApiKeyMiddleware)
 app.include_router(pdf_router, prefix="/pdf", tags=["PDF Converter"])
 app.include_router(extract_router, prefix="/extract", tags=["Data Extractor"])
 app.include_router(intel_router, prefix="/intel", tags=["Website Intelligence"])
-
-# Import here to avoid circular dependencies if we move things, but better to import at top
-from routers.tools import router as tools_router
 app.include_router(tools_router, prefix="/tools", tags=["Developer Tools"])
 
 
