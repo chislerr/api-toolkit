@@ -2,6 +2,7 @@ services:
   - type: web
     name: api-toolkit
     runtime: docker
+    dockerfilePath: Dockerfile.light
     plan: free
     envVars:
       - key: API_KEY
