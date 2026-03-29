@@ -65,7 +65,9 @@ class ArticleResponse(BaseModel):
     body: str = ""
     images: list[str] = []
     word_count: int = 0
+    language: str = ""
     source_url: str = ""
+    confidence: dict = {}
 
 
 class ExtractContactRequest(BaseModel):
@@ -78,6 +80,7 @@ class ContactResponse(BaseModel):
     addresses: list[str] = []
     social_links: dict[str, str] = {}
     source_url: str = ""
+    confidence: dict = {}
 
 
 class ExtractProductRequest(BaseModel):
@@ -91,8 +94,38 @@ class ProductResponse(BaseModel):
     description: str = ""
     images: list[str] = []
     sku: str = ""
+    brand: str = ""
     availability: str = ""
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
     source_url: str = ""
+    extraction_method: str = ""
+    confidence: dict = {}
+
+
+class ExtractRecipeRequest(BaseModel):
+    url: str = Field(..., description="Recipe page URL")
+
+
+class RecipeResponse(BaseModel):
+    name: str = ""
+    description: str = ""
+    author: str = ""
+    prep_time: str = ""
+    cook_time: str = ""
+    total_time: str = ""
+    servings: str = ""
+    ingredients: list[str] = []
+    instructions: list[str] = []
+    images: list[str] = []
+    cuisine: str = ""
+    category: str = ""
+    calories: str = ""
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    source_url: str = ""
+    extraction_method: str = ""
+    confidence: dict = {}
 
 
 class CustomExtractionRequest(BaseModel):
