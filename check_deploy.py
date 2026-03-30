@@ -122,6 +122,46 @@ def check_pdf_absent():
         print(f"  ERROR — {e}")
 
 
+def check_seo_structured_data():
+    print("\nTesting /seo/structured-data ...")
+    payload = {"url": "https://www.bbcgoodfood.com/recipes/easy-pancakes"}
+    try:
+        r = httpx.post(
+            f"{API_URL}/seo/structured-data",
+            json=payload,
+            headers=HEADERS,
+            timeout=30.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            s = data.get("summary", {})
+            print(f"  OK — Entities: {s.get('total_entities', 0)}, Score: {s.get('overall_score', 0)}, Eligible: {s.get('rich_results_eligible', [])}")
+        else:
+            print(f"  FAIL — {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"  ERROR — {e}")
+
+
+def check_seo_rich_results():
+    print("\nTesting /seo/rich-results ...")
+    payload = {"url": "https://www.bbcgoodfood.com/recipes/easy-pancakes"}
+    try:
+        r = httpx.post(
+            f"{API_URL}/seo/rich-results",
+            json=payload,
+            headers=HEADERS,
+            timeout=30.0,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            s = data.get("summary", {})
+            print(f"  OK — Eligible: {s.get('eligible_count', 0)}/{s.get('total_types_checked', 0)} types")
+        else:
+            print(f"  FAIL — {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"  ERROR — {e}")
+
+
 if __name__ == "__main__":
     if check_health():
         time.sleep(2)
@@ -129,6 +169,8 @@ if __name__ == "__main__":
         check_html_to_md()
         check_extract_article()
         check_intel_techstack()
+        check_seo_structured_data()
+        check_seo_rich_results()
         check_pdf_absent()
         print("\n--- All checks done ---")
     else:

@@ -7,6 +7,7 @@ from core.config import get_settings
 from core.middleware import ApiKeyMiddleware, RequestLoggingMiddleware
 from apis.extract.router import router as extract_router
 from apis.intel.router import router as intel_router
+from apis.seo.router import router as seo_router
 from routers.tools import router as tools_router
 
 try:
@@ -82,6 +83,7 @@ if HAS_PDF:
     app.include_router(pdf_router, prefix="/pdf", tags=["PDF Converter"])
 app.include_router(extract_router, prefix="/extract", tags=["Data Extractor"])
 app.include_router(intel_router, prefix="/intel", tags=["Website Intelligence"])
+app.include_router(seo_router, prefix="/seo", tags=["SEO Validator"])
 app.include_router(tools_router, prefix="/tools", tags=["Developer Tools"])
 
 
