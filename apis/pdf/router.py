@@ -27,8 +27,8 @@ async def pdf_from_url(request: PdfFromUrlRequest):
             header_html=request.header_html,
             footer_html=request.footer_html,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="PDF generation failed")
 
     return Response(
         content=pdf_bytes,
@@ -56,8 +56,8 @@ async def pdf_from_html(request: PdfFromHtmlRequest):
             margin_right=request.margin_right,
             print_background=request.print_background,
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="PDF generation failed")
 
     return Response(
         content=pdf_bytes,

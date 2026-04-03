@@ -16,7 +16,9 @@ def check_health():
         try:
             r = httpx.get(f"{API_URL}/health", timeout=10.0)
             if r.status_code == 200:
-                print("Server is healthy!")
+                data = r.json()
+                uptime = data.get("uptime_seconds", "?")
+                print(f"Server is healthy! Uptime: {uptime}s")
                 return True
         except httpx.RequestError:
             pass

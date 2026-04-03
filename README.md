@@ -14,6 +14,10 @@ A portfolio of high-value APIs for developers: PDF generation, data extraction, 
 | **Website Intelligence** | `POST /intel/audit` | Full site audit (SEO, security, tech stack) |
 | | `POST /intel/headers` | Security headers analysis (A-F grade) |
 | | `POST /intel/techstack` | Technology stack detection |
+| **Structured Data Validator** | `POST /seo/structured-data` | Extract & validate all structured data (JSON-LD, Microdata, OG, Twitter) |
+| | `POST /seo/rich-results` | Google Rich Results eligibility (18 types) |
+| | `POST /seo/validate-html` | Validate raw HTML string (no URL fetch) |
+| | `POST /seo/health-score` | Overall structured data score (0-100) with fix suggestions |
 
 ## Quick Start
 

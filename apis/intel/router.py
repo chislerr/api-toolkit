@@ -1,8 +1,13 @@
-from fastapi import APIRouter, HTTPException
-from core.models import IntelAuditRequest, IntelAuditResponse, SecurityHeaders, MetaTags
-from apis.intel.service import audit_site, _check_security_headers, _extract_meta_tags, _detect_tech_stack
 import httpx
+from fastapi import APIRouter, HTTPException
+from .service import full_audit, _check_security_headers, _detect_tech_stack, _get_client
 from bs4 import BeautifulSoup
+from core.models import (
+    IntelAuditRequest,
+    IntelAuditResponse,
+    SecurityHeaders,
+)
+from core.ssrf import validate_url
 
 router = APIRouter()
 
@@ -11,40 +16,36 @@ router = APIRouter()
     "/audit",
     response_model=IntelAuditResponse,
     summary="Full website audit",
-    description=(
-        "Run a comprehensive website intelligence audit in one call. "
-        "Returns meta tags, detected tech stack, security header score, "
-        "broken links, performance metrics, and mobile-friendliness."
-    ),
+    description="Perform a comprehensive website audit including meta tags, tech stack detection, security headers, performance metrics, broken link checking, and mobile-friendliness.",
 )
-async def api_audit(request: IntelAuditRequest):
+async def api_full_audit(request: IntelAuditRequest):
     try:
-        result = await audit_site(request.url)
+        result = await full_audit(request.url)
         return IntelAuditResponse(**result)
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Target site returned HTTP {e.response.status_code}",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Audit failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to perform website audit")
 
 
 @router.post(
     "/headers",
     response_model=SecurityHeaders,
-    summary="Security headers analysis",
-    description="Check a URL's HTTP security headers and get a grade (A-F).",
+    summary="Check security headers",
+    description="Analyze a website's HTTP security headers and provide a security grade (A-F).",
 )
-async def api_headers(request: IntelAuditRequest):
+async def api_security_headers(request: IntelAuditRequest):
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client:
+        validate_url(request.url)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             response = await client.get(request.url)
             headers = dict(response.headers)
         result = _check_security_headers(headers)
         return SecurityHeaders(**result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Headers check failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to check security headers")
 
 
 @router.post(
@@ -54,12 +55,15 @@ async def api_headers(request: IntelAuditRequest):
 )
 async def api_techstack(request: IntelAuditRequest):
     try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, verify=False) as client:
+        validate_url(request.url)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             response = await client.get(request.url)
-            html = response.text
             headers = dict(response.headers)
-        soup = BeautifulSoup(html, "lxml")
-        techs = _detect_tech_stack(soup, html, headers)
-        return {"url": request.url, "technologies": techs}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Tech detection failed: {str(e)}")
+            html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        technologies = _detect_tech_stack(soup, headers, html)
+        return {"technologies": technologies, "source_url": request.url}
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to detect technology stack")

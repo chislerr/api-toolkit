@@ -26,17 +26,49 @@ async def test_root(client):
 
 
 @pytest.mark.asyncio
-async def test_auth_required(client):
-    """Endpoints should require API key."""
-    response = await client.post("/pdf/from-url", json={"url": "https://example.com"})
+async def test_auth_required_extract(client):
+    response = await client.post("/v1/extract/article", json={"url": "https://example.com"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_required_intel(client):
+    response = await client.post("/v1/intel/audit", json={"url": "https://example.com"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_required_seo(client):
+    response = await client.post("/v1/seo/structured-data", json={"url": "https://example.com"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_required_tools(client):
+    response = await client.post("/v1/tools/html-to-markdown", json={"url": "https://example.com"})
     assert response.status_code == 401
 
 
 @pytest.mark.asyncio
 async def test_auth_success(client):
-    """Valid API key should pass auth."""
     response = await client.get(
         "/health",
         headers={"X-API-Key": "dev-api-key-change-me"},
     )
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_request_id_header(client):
+    response = await client.get("/health")
+    assert "x-request-id" in response.headers
+
+
+@pytest.mark.asyncio
+async def test_openapi_schema(client):
+    response = await client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    assert "paths" in schema
+    for path in schema["paths"]:
+        assert path.startswith("/v1/") or path in ("/health", "/ready", "/")

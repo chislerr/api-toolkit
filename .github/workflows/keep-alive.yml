@@ -1,0 +1,19 @@
+name: API Keep-Alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping health endpoint
+        run: |
+          curl -sf --max-time 10 https://api-toolkit-yb1l.onrender.com/health || exit 1
+
+      - name: Ping ready endpoint
+        run: |
+          curl -sf --max-time 10 https://api-toolkit-yb1l.onrender.com/ready || exit 1
