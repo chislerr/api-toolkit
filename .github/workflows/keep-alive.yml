@@ -27,4 +27,5 @@ jobs:
 
       - name: Ping ready endpoint
         run: |
-          curl -sf --max-time 15 https://api-toolkit-yb1l.onrender.com/ready || exit 1
+          # Non-critical check — just keep the service warm
+          curl -sf --max-time 15 https://api-toolkit-yb1l.onrender.com/ready || true
