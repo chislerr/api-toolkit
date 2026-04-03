@@ -10,10 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Ping health endpoint
+      - name: Wake up service and ping health
         run: |
-          curl -sf --max-time 10 https://api-toolkit-yb1l.onrender.com/health || exit 1
+          # Render free tier spins down after 15 min of inactivity.
+          # First request triggers a ~60s boot. We retry until it responds.
+          for i in $(seq 1 12); do
+            if curl -sf --max-time 15 https://api-toolkit-yb1l.onrender.com/health; then
+              echo "Health check passed on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i failed, waiting 10s..."
+            sleep 10
+          done
+          echo "Health check failed after 12 attempts (~2 minutes)"
+          exit 1
 
       - name: Ping ready endpoint
         run: |
-          curl -sf --max-time 10 https://api-toolkit-yb1l.onrender.com/ready || exit 1
+          curl -sf --max-time 15 https://api-toolkit-yb1l.onrender.com/ready || exit 1
