@@ -6,7 +6,7 @@ services:
     plan: free
     envVars:
       - key: API_KEY
-        generateValue: true
+        value: "CsSiJoPjB2+1hmLLncCoO1ApAK8XRF4gy+Y6L+jen/w="
       - key: RATE_LIMIT
         value: 100
       - key: HOST
