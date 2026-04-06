@@ -183,3 +183,5 @@ async def ready():
         "version": settings.app_version,
         "uptime_seconds": int(time.time() - STARTUP_TIME),
     }
+
+# Force redeploy marker
