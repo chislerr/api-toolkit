@@ -111,15 +111,14 @@ async def startup():
     import httpx
 
     async def internal_pinger():
-        """Primary: self-ping every 10 minutes via localhost."""
+        """Primary: hit PUBLIC URL every 10 minutes to prevent Render spin-down."""
         failures = 0
         await asyncio.sleep(30)
+        public_url = "https://api-toolkit-yb1l.onrender.com"
         while True:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(
-                        f"http://localhost:{settings.port}/health", timeout=10
-                    )
+                    resp = await client.get(f"{public_url}/health", timeout=15)
                     if resp.status_code == 200:
                         if failures > 0:
                             logger.info(f"Keep-alive recovered after {failures} failures")
@@ -133,23 +132,25 @@ async def startup():
             await asyncio.sleep(600)
 
     async def external_pinger():
-        """Secondary: call public health endpoint every 12 minutes.
-        This creates external traffic that also prevents spin-down,
-        and works even if localhost networking is somehow broken.
+        """Secondary: call PUBLIC URL every 12 minutes.
+        Render only counts external inbound traffic for spin-down.
+        Localhost requests do NOT prevent spin-down.
         """
         failures = 0
         await asyncio.sleep(60)
-        base_url = f"http://localhost:{settings.port}"
+        public_url = "https://api-toolkit-yb1l.onrender.com"
         while True:
             try:
                 async with httpx.AsyncClient() as client:
-                    resp = await client.get(f"{base_url}/ready", timeout=10)
+                    resp = await client.get(f"{public_url}/health", timeout=15)
                     if resp.status_code == 200:
                         failures = 0
                     else:
                         failures += 1
-            except Exception:
+                        logger.warning(f"External keep-alive returned {resp.status_code} (#{failures})")
+            except Exception as e:
                 failures += 1
+                logger.warning(f"External keep-alive failed: {e} (#{failures})")
             await asyncio.sleep(720)
 
     asyncio.create_task(internal_pinger())
