@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from enum import Enum
 from urllib.parse import urlparse
+import re
 
 
 def _validate_url(value: str) -> str:
@@ -13,6 +14,15 @@ def _validate_url(value: str) -> str:
         raise ValueError("URL must start with http:// or https://")
     if not parsed.hostname:
         raise ValueError("URL must contain a valid hostname")
+    return value
+
+
+MARGIN_PATTERN = re.compile(r"^\d+(?:\.\d+)?(?:mm|cm|in|px)$")
+
+
+def _validate_margin(value: str) -> str:
+    if not MARGIN_PATTERN.fullmatch(value.strip()):
+        raise ValueError("Margin values must look like '10mm', '0.5in', '12px', or '1cm'")
     return value
 
 
@@ -58,6 +68,11 @@ class PdfFromUrlRequest(BaseModel):
     def validate_url(cls, v: str) -> str:
         return _validate_url(v)
 
+    @field_validator("margin_top", "margin_bottom", "margin_left", "margin_right")
+    @classmethod
+    def validate_margin(cls, v: str) -> str:
+        return _validate_margin(v)
+
 
 class PdfFromHtmlRequest(BaseModel):
     html: str = Field(..., description="HTML content to convert to PDF", max_length=5_000_000)
@@ -68,6 +83,11 @@ class PdfFromHtmlRequest(BaseModel):
     margin_left: str = "10mm"
     margin_right: str = "10mm"
     print_background: bool = True
+
+    @field_validator("margin_top", "margin_bottom", "margin_left", "margin_right")
+    @classmethod
+    def validate_margin(cls, v: str) -> str:
+        return _validate_margin(v)
 
 
 # ─── Extract API Models ──────────────────────────────────────────

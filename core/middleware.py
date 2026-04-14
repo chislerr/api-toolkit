@@ -58,9 +58,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         provided_key = request.headers.get("X-API-Key", "")
-        
-        logger.info(f"API Key check - provided: {provided_key[:20]}..., expected: {self.api_key[:20]}...")
-        
+
         if not provided_key or provided_key != self.api_key:
             return Response(
                 status_code=401,

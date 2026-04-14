@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
+    keep_alive_enabled: bool = True
+    keep_alive_public_url: str = "https://api-toolkit-yb1l.onrender.com"
 
     # App Info
     app_name: str = "API Toolkit"

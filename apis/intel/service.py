@@ -1,37 +1,22 @@
 import time
-import httpx
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
+
+from bs4 import BeautifulSoup
+
+from core.fetch import build_async_client, fetch_html
 from core.ssrf import validate_url
-
-# ─── HTTP Client ──────────────────────────────────────────────────
-
-
-def _get_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=30.0,
-        follow_redirects=True,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        },
-    )
-
-
-# ─── Helpers ──────────────────────────────────────────────────────
 
 
 def _format_size(size_bytes: int) -> str:
     if size_bytes < 1024:
         return f"{size_bytes} B"
-    elif size_bytes < 1024 * 1024:
+    if size_bytes < 1024 * 1024:
         return f"{size_bytes / 1024:.1f} KB"
-    else:
-        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 def _check_security_headers(headers: dict) -> dict:
     headers_lower = {k.lower(): v for k, v in headers.items()}
-
     checks = {
         "strict-transport-security": "has_hsts",
         "content-security-policy": "has_csp",
@@ -43,11 +28,10 @@ def _check_security_headers(headers: dict) -> dict:
     results = {}
     score = 0
     details = {}
-
     for header, field in checks.items():
         present = header in headers_lower
         results[field] = present
-        details[header] = "Present" if present else "Missing"
+        details[header] = headers_lower.get(header, "Missing")
         if present:
             score += 1
 
@@ -67,100 +51,114 @@ def _check_security_headers(headers: dict) -> dict:
     return results
 
 
-def _detect_tech_stack(soup: BeautifulSoup, headers: dict, html: str) -> list:
-    technologies = []
+def _append_tech(technologies: list[str], name: str) -> None:
+    if name not in technologies:
+        technologies.append(name)
 
+
+def _detect_tech_stack(soup: BeautifulSoup, headers: dict, html: str) -> list[str]:
+    technologies: list[str] = []
     headers_lower = {k.lower(): v for k, v in headers.items()}
+    html_lower = html.lower()
 
     server = headers_lower.get("server", "")
     if "nginx" in server.lower():
-        technologies.append("Nginx")
+        _append_tech(technologies, "Nginx")
     if "apache" in server.lower():
-        technologies.append("Apache")
-    if "cloudflare" in server.lower():
-        technologies.append("Cloudflare")
-    if "google" in server.lower():
-        technologies.append("Google Cloud")
+        _append_tech(technologies, "Apache")
+    if "cloudflare" in server.lower() or "cf-ray" in headers_lower:
+        _append_tech(technologies, "Cloudflare")
 
     powered_by = headers_lower.get("x-powered-by", "")
     if "express" in powered_by.lower():
-        technologies.append("Express.js")
-    if "next.js" in powered_by.lower():
-        technologies.append("Next.js")
+        _append_tech(technologies, "Express.js")
+    if "next.js" in powered_by.lower() or "__next_data__" in html_lower or "/_next/" in html_lower:
+        _append_tech(technologies, "Next.js")
     if "php" in powered_by.lower():
-        technologies.append("PHP")
+        _append_tech(technologies, "PHP")
     if "asp.net" in powered_by.lower():
-        technologies.append("ASP.NET")
+        _append_tech(technologies, "ASP.NET")
 
-    if soup.find("script", src=lambda x: x and "react" in x.lower()):
-        technologies.append("React")
-    if soup.find("script", src=lambda x: x and "angular" in x.lower()):
-        technologies.append("Angular")
-    if soup.find("script", src=lambda x: x and "vue" in x.lower()):
-        technologies.append("Vue.js")
-    if soup.find("script", src=lambda x: x and "jquery" in x.lower()):
-        technologies.append("jQuery")
-    if soup.find("script", src=lambda x: x and "bootstrap" in x.lower()):
-        technologies.append("Bootstrap")
-    if soup.find("script", src=lambda x: x and "tailwind" in x.lower()):
-        technologies.append("Tailwind CSS")
-    if soup.find("link", href=lambda x: x and "tailwind" in x.lower()):
-        if "Tailwind CSS" not in technologies:
-            technologies.append("Tailwind CSS")
+    if "react" in html_lower or soup.find(attrs={"data-reactroot": True}):
+        _append_tech(technologies, "React")
+    if "ng-version" in html_lower:
+        _append_tech(technologies, "Angular")
+    if "/_nuxt/" in html_lower or 'id="__nuxt"' in html_lower:
+        _append_tech(technologies, "Nuxt.js")
+    if "vue" in html_lower:
+        _append_tech(technologies, "Vue.js")
+    if "jquery" in html_lower:
+        _append_tech(technologies, "jQuery")
+    if "bootstrap" in html_lower:
+        _append_tech(technologies, "Bootstrap")
+    if "tailwind" in html_lower:
+        _append_tech(technologies, "Tailwind CSS")
 
-    if soup.find("meta", attrs={"name": "generator"}):
-        generator = soup.find("meta", attrs={"name": "generator"}).get("content", "")
-        if "wordpress" in generator.lower():
-            technologies.append("WordPress")
-        if "drupal" in generator.lower():
-            technologies.append("Drupal")
-        if "joomla" in generator.lower():
-            technologies.append("Joomla")
-        if "wix" in generator.lower():
-            technologies.append("Wix")
-        if "squarespace" in generator.lower():
-            technologies.append("Squarespace")
-        if "shopify" in generator.lower():
-            technologies.append("Shopify")
-        if "webflow" in generator.lower():
-            technologies.append("Webflow")
+    generator = soup.find("meta", attrs={"name": "generator"})
+    generator_text = generator.get("content", "") if generator else ""
+    if "wordpress" in generator_text.lower() or "wp-content" in html_lower or "wp-json" in html_lower:
+        _append_tech(technologies, "WordPress")
+    if "shopify" in generator_text.lower() or "cdn.shopify.com" in html_lower or "x-shopid" in headers_lower:
+        _append_tech(technologies, "Shopify")
+    if "wix" in generator_text.lower() or "wixstatic" in html_lower or "x-wix-request-id" in headers_lower:
+        _append_tech(technologies, "Wix")
+    if "webflow" in generator_text.lower() or "webflow" in html_lower:
+        _append_tech(technologies, "Webflow")
 
-    if soup.find("script", src=lambda x: x and "googletagmanager" in x.lower()):
-        technologies.append("Google Tag Manager")
-    if soup.find("script", src=lambda x: x and "google-analytics" in x.lower()):
-        technologies.append("Google Analytics")
-    if soup.find("script", src=lambda x: x and "facebook" in x.lower()):
-        technologies.append("Facebook Pixel")
-    if soup.find("script", src=lambda x: x and "hotjar" in x.lower()):
-        technologies.append("Hotjar")
+    if "googletagmanager" in html_lower:
+        _append_tech(technologies, "Google Tag Manager")
+    if "google-analytics" in html_lower or "gtag/js" in html_lower:
+        _append_tech(technologies, "Google Analytics")
+    if "plausible" in html_lower:
+        _append_tech(technologies, "Plausible Analytics")
+    if "hotjar" in html_lower:
+        _append_tech(technologies, "Hotjar")
+    if "segment.com" in html_lower:
+        _append_tech(technologies, "Segment")
 
-    if soup.find("link", href=lambda x: x and "fonts.googleapis" in x.lower()):
-        technologies.append("Google Fonts")
-
-    if "x-shopid" in headers_lower:
-        technologies.append("Shopify")
-    if "x-wix-request-id" in headers_lower:
-        technologies.append("Wix")
     if "x-vercel-id" in headers_lower:
-        technologies.append("Vercel")
+        _append_tech(technologies, "Vercel")
     if "x-render-origin-server" in headers_lower:
-        technologies.append("Render")
+        _append_tech(technologies, "Render")
     if "x-amz-cf-id" in headers_lower or "x-amz-request-id" in headers_lower:
-        technologies.append("AWS CloudFront")
+        _append_tech(technologies, "AWS CloudFront")
     if "x-fastly" in headers_lower or "x-served-by" in headers_lower:
-        technologies.append("Fastly")
-    if "cf-ray" in headers_lower:
-        if "Cloudflare" not in technologies:
-            technologies.append("Cloudflare")
-    if "x-github-request-id" in headers_lower:
-        technologies.append("GitHub Pages")
+        _append_tech(technologies, "Fastly")
     if "x-netlify" in headers_lower:
-        technologies.append("Netlify")
+        _append_tech(technologies, "Netlify")
 
     return technologies
 
 
-# ─── Main Audit Function ──────────────────────────────────────────
+async def _find_broken_internal_links(url: str, soup: BeautifulSoup) -> list[str]:
+    parsed_base = urlparse(url)
+    candidates: list[str] = []
+    for anchor in soup.find_all("a", href=True):
+        href = anchor["href"].strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        full_url = urljoin(url, href)
+        if urlparse(full_url).netloc == parsed_base.netloc:
+            candidates.append(full_url)
+
+    unique_links = []
+    for link in candidates:
+        if link not in unique_links:
+            unique_links.append(link)
+
+    broken: list[str] = []
+    async with build_async_client(timeout=10.0) as client:
+        for link in unique_links[:20]:
+            try:
+                validate_url(link)
+                response = await client.head(link)
+                if response.status_code in {403, 405, 501}:
+                    response = await client.get(link)
+                if response.status_code >= 400:
+                    broken.append(link)
+            except Exception:
+                broken.append(link)
+    return broken
 
 
 async def full_audit(url: str) -> dict:
@@ -168,78 +166,60 @@ async def full_audit(url: str) -> dict:
     validate_url(url)
 
     start_time = time.time()
-    async with _get_client() as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
-        headers = dict(response.headers)
-        load_time_ms = int((time.time() - start_time) * 1000)
+    fetched = await fetch_html(url, timeout=20.0)
+    load_time_ms = int((time.time() - start_time) * 1000)
 
+    html = fetched.html
+    headers = fetched.headers
+    source_url = fetched.final_url
     soup = BeautifulSoup(html, "html.parser")
 
-    # Meta tags
-    meta_tags = {}
-    title_el = soup.find("title")
-    meta_tags["title"] = title_el.get_text(strip=True) if title_el else ""
-
-    for meta_name, prop_name in [
-        ("description", "description"),
-        ("og:title", "og:title"),
-        ("og:description", "og:description"),
-        ("og:image", "og:image"),
-        ("twitter:card", "twitter:card"),
-    ]:
-        el = soup.find("meta", attrs={"name": meta_name}) or soup.find(
-            "meta", attrs={"property": prop_name}
-        )
-        if el:
-            key = meta_name.replace(":", "_")
-            meta_tags[key] = el.get("content", "")
+    meta_tags = {
+        "title": soup.title.get_text(strip=True) if soup.title else "",
+        "description": "",
+        "og_title": "",
+        "og_description": "",
+        "og_image": "",
+        "twitter_card": "",
+        "canonical": "",
+    }
+    for key, names in {
+        "description": ("description",),
+        "og_title": ("og:title",),
+        "og_description": ("og:description",),
+        "og_image": ("og:image",),
+        "twitter_card": ("twitter:card",),
+    }.items():
+        for name in names:
+            tag = (
+                soup.find("meta", attrs={"name": name})
+                or soup.find("meta", attrs={"property": name})
+            )
+            if tag and tag.get("content"):
+                meta_tags[key] = tag["content"]
+                break
 
     canonical = soup.find("link", rel="canonical")
-    if canonical:
-        meta_tags["canonical"] = canonical.get("href", "")
+    if canonical and canonical.get("href"):
+        meta_tags["canonical"] = urljoin(source_url, canonical["href"])
 
-    # Tech stack
     tech_stack = _detect_tech_stack(soup, headers, html)
-
-    # Security headers
     security_headers = _check_security_headers(headers)
-
-    # Performance
     page_size = len(html.encode("utf-8"))
-    num_requests = 1
-    for tag in soup.find_all(["script", "link", "img"]):
-        if tag.get("src") or tag.get("href"):
-            num_requests += 1
+    num_requests = 1 + len(
+        [
+            tag
+            for tag in soup.find_all(["script", "link", "img"])
+            if tag.get("src") or tag.get("href")
+        ]
+    )
+    broken_links = await _find_broken_internal_links(source_url, soup)
 
-    # Broken links (internal only, check up to 20)
-    broken_links = []
-    parsed_base = urlparse(url)
-    base_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    internal_links = []
-
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"]
-        full_url = urljoin(url, href)
-        if urlparse(full_url).netloc == parsed_base.netloc:
-            internal_links.append(full_url)
-
-    for link in internal_links[:20]:
-        try:
-            async with _get_client() as client:
-                resp = await client.head(link, timeout=5.0)
-                if resp.status_code >= 400:
-                    broken_links.append(link)
-        except Exception:
-            pass
-
-    # Mobile friendly (basic check)
     viewport = soup.find("meta", attrs={"name": "viewport"})
-    is_mobile_friendly = viewport is not None
+    is_mobile_friendly = bool(viewport and "width=device-width" in viewport.get("content", "").lower())
 
     return {
-        "url": url,
+        "url": source_url,
         "meta_tags": meta_tags,
         "tech_stack": tech_stack,
         "security_headers": security_headers,
@@ -251,5 +231,5 @@ async def full_audit(url: str) -> dict:
         },
         "broken_links": broken_links,
         "is_mobile_friendly": is_mobile_friendly,
-        "source_url": url,
+        "source_url": source_url,
     }

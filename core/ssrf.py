@@ -38,6 +38,9 @@ def validate_url(url: str) -> str:
     if not parsed.hostname:
         raise HTTPException(status_code=400, detail="Invalid URL: missing hostname")
 
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="URLs with embedded credentials are not allowed.")
+
     hostname = parsed.hostname.lower()
 
     if hostname in BLOCKED_HOSTNAMES:
@@ -47,19 +50,30 @@ def validate_url(url: str) -> str:
         )
 
     try:
-        addr = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+        addr = socket.getaddrinfo(
+            hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
         if not addr:
             raise HTTPException(status_code=400, detail=f"Could not resolve hostname: {hostname}")
 
-        ip_str = addr[0][4][0]
-        ip_addr = ipaddress.ip_address(ip_str)
+        resolved_ips: set[str] = set()
+        for entry in addr:
+            ip_str = entry[4][0]
+            if "%" in ip_str:
+                ip_str = ip_str.split("%", 1)[0]
+            resolved_ips.add(ip_str)
 
-        for network in BLOCKED_NETWORKS:
-            if ip_addr in network:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Access to internal address '{ip_str}' is not allowed.",
-                )
+        for ip_str in resolved_ips:
+            ip_addr = ipaddress.ip_address(ip_str)
+
+            for network in BLOCKED_NETWORKS:
+                if ip_addr in network:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Access to internal address '{ip_str}' is not allowed.",
+                    )
     except HTTPException:
         raise
     except socket.gaierror:

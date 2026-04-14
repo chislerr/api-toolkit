@@ -1,6 +1,6 @@
 import io
-import math
 import os
+import re
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 # ─── Font Paths ──────────────────────────────────────────────────
@@ -60,12 +60,18 @@ TEMPLATES = {
 # ─── Helpers ─────────────────────────────────────────────────────
 
 
-def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
-    """Convert hex color string to RGB tuple."""
-    hex_color = hex_color.lstrip("#")
-    if len(hex_color) == 3:
-        hex_color = "".join(c * 2 for c in hex_color)
-    return tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+def _hex_to_rgb(
+    hex_color: str | None, fallback: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    """Convert a hex color string to RGB, falling back safely on bad input."""
+    if not isinstance(hex_color, str):
+        return fallback
+    normalized = hex_color.strip().lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{3}", normalized):
+        normalized = "".join(c * 2 for c in normalized)
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", normalized):
+        return fallback
+    return tuple(int(normalized[i : i + 2], 16) for i in (0, 2, 4))
 
 
 def _lighten(rgb: tuple, factor: float = 0.3) -> tuple[int, int, int]:
@@ -259,13 +265,23 @@ def generate_og_image(
     # Defaults
     bg_color = bg_color or "#1a202c"
     text_color = text_color or "#ffffff"
+    title = (title or "").strip() or "Untitled"
+    subtitle = subtitle.strip() if isinstance(subtitle, str) else subtitle
+    author = author.strip() if isinstance(author, str) else author
+    tag = tag.strip() if isinstance(tag, str) else tag
+    domain = domain.strip() if isinstance(domain, str) else domain
+    reading_time = reading_time.strip() if isinstance(reading_time, str) else reading_time
     template = template if template in TEMPLATES else "blog"
     background = background if background in BACKGROUND_RENDERERS else "solid"
 
     tmpl = TEMPLATES[template]
-    bg_rgb = _hex_to_rgb(bg_color)
-    text_rgb = _hex_to_rgb(text_color)
-    accent_rgb = _hex_to_rgb(accent_color) if accent_color else _lighten(bg_rgb, 0.5)
+    bg_rgb = _hex_to_rgb(bg_color, (26, 32, 44))
+    text_rgb = _hex_to_rgb(text_color, (255, 255, 255))
+    accent_rgb = (
+        _hex_to_rgb(accent_color, _lighten(bg_rgb, 0.5))
+        if accent_color
+        else _lighten(bg_rgb, 0.5)
+    )
 
     # Faded text color for secondary elements
     faded_rgb = (

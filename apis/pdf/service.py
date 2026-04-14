@@ -1,20 +1,35 @@
 import logging
+from io import BytesIO
+from urllib.parse import urlparse
+
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+
+from core.ssrf import validate_url
 
 logger = logging.getLogger("api.pdf")
 
-# Reusable browser instance (created on first call)
 _browser = None
+_playwright = None
 
 
 async def _get_browser():
     """Get or create a shared browser instance for PDF generation."""
-    global _browser
+    global _browser, _playwright
     if _browser is None or not _browser.is_connected():
-        pw = await async_playwright().start()
-        _browser = await pw.chromium.launch(headless=True)
+        _playwright = await async_playwright().start()
+        _browser = await _playwright.chromium.launch(headless=True)
         logger.info("Browser instance launched for PDF service")
     return _browser
+
+
+def _is_allowed_resource_url(resource_url: str) -> bool:
+    scheme = urlparse(resource_url).scheme.lower()
+    if scheme in {"", "about", "data", "blob"}:
+        return True
+    validate_url(resource_url)
+    return True
 
 
 async def html_to_pdf(
@@ -31,35 +46,45 @@ async def html_to_pdf(
     footer_html: str | None = None,
 ) -> bytes:
     """
-    Convert HTML string or URL to PDF using Playwright / headless Chromium.
+    Convert HTML or a URL to PDF using Playwright / headless Chromium.
     Returns raw PDF bytes.
     """
     browser = await _get_browser()
-    page = await browser.new_page()
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+
+    async def route_handler(route):
+        try:
+            _is_allowed_resource_url(route.request.url)
+            await route.continue_()
+        except Exception:
+            logger.warning("Blocked unsafe resource request during PDF render: %s", route.request.url)
+            await route.abort()
+
+    await page.route("**/*", route_handler)
 
     try:
         if url:
-            await page.goto(url, wait_until="networkidle", timeout=30_000)
+            validate_url(url)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5_000)
+            except PlaywrightTimeoutError:
+                logger.info("Continuing PDF render after network idle timeout for %s", url)
         elif html:
-            await page.set_content(html, wait_until="networkidle", timeout=15_000)
+            await page.set_content(html, wait_until="load", timeout=15_000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3_000)
+            except PlaywrightTimeoutError:
+                logger.info("Continuing PDF render after HTML network idle timeout")
         else:
             raise ValueError("Either 'url' or 'html' must be provided")
 
-        # Page size dimensions (width x height in inches)
-        page_sizes = {
-            "A4": {"width": "8.27in", "height": "11.69in"},
-            "Letter": {"width": "8.5in", "height": "11in"},
-            "Legal": {"width": "8.5in", "height": "14in"},
-            "A3": {"width": "11.69in", "height": "16.54in"},
-            "Tabloid": {"width": "11in", "height": "17in"},
-        }
-
-        size = page_sizes.get(page_size, page_sizes["A4"])
+        await page.emulate_media(media="screen")
 
         pdf_options = {
+            "format": page_size,
             "landscape": landscape,
-            "width": size["width"],
-            "height": size["height"],
             "margin": {
                 "top": margin_top,
                 "bottom": margin_bottom,
@@ -72,7 +97,6 @@ async def html_to_pdf(
         if header_html:
             pdf_options["header_template"] = header_html
             pdf_options["display_header_footer"] = True
-
         if footer_html:
             pdf_options["footer_template"] = footer_html
             pdf_options["display_header_footer"] = True
@@ -80,15 +104,17 @@ async def html_to_pdf(
         pdf_bytes = await page.pdf(**pdf_options)
         logger.info("PDF generated: %d bytes (source=%s)", len(pdf_bytes), url or "html")
         return pdf_bytes
-
+    except PlaywrightTimeoutError as exc:
+        raise RuntimeError("Timed out while rendering the page to PDF") from exc
+    except PlaywrightError as exc:
+        raise RuntimeError(f"PDF rendering failed: {exc}") from exc
     finally:
-        await page.close()
+        await context.close()
 
 
 async def merge_pdfs(pdf_list: list[bytes]) -> bytes:
     """Merge multiple PDF byte arrays into a single PDF."""
     from pypdf import PdfReader, PdfWriter
-    from io import BytesIO
 
     writer = PdfWriter()
 
@@ -100,5 +126,5 @@ async def merge_pdfs(pdf_list: list[bytes]) -> bytes:
     output = BytesIO()
     writer.write(output)
     result = output.getvalue()
-    logger.info("Merged %d PDFs → %d bytes", len(pdf_list), len(result))
+    logger.info("Merged %d PDFs -> %d bytes", len(pdf_list), len(result))
     return result

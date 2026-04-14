@@ -1,472 +1,820 @@
+import json
 import logging
 import re
-import httpx
+from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 from readability import Document
+
+from core.fetch import fetch_html
 from core.ssrf import validate_url
 
 logger = logging.getLogger("api-toolkit.extract")
 
-# ─── HTTP Client ──────────────────────────────────────────────────
+EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+PHONE_PATTERN = re.compile(
+    r"(?:\+\d{1,3}[\s().-]*)?(?:\(?\d{2,4}\)?[\s().-]*){2,5}\d{2,4}"
+)
+PRICE_PATTERN = re.compile(
+    r"(?P<prefix>USD|EUR|GBP|CAD|AUD|JPY|UAH|[$€£¥₴])?\s*"
+    r"(?P<amount>\d[\d,.]*)"
+    r"(?:\s*(?P<suffix>USD|EUR|GBP|CAD|AUD|JPY|UAH))?",
+    re.IGNORECASE,
+)
+SOCIAL_DOMAINS = {
+    "facebook.com": "facebook",
+    "twitter.com": "twitter",
+    "x.com": "x",
+    "linkedin.com": "linkedin",
+    "instagram.com": "instagram",
+    "youtube.com": "youtube",
+    "tiktok.com": "tiktok",
+    "github.com": "github",
+}
 
 
-def _get_client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        timeout=30.0,
-        follow_redirects=True,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        },
-    )
+def _clean_text(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split()).strip()
 
 
-# ─── Helpers ──────────────────────────────────────────────────────
+def _coerce_text(value: object) -> str:
+    if isinstance(value, dict):
+        for key in ("name", "text", "value", "description", "url"):
+            text = _coerce_text(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        for item in value:
+            text = _coerce_text(item)
+            if text:
+                return text
+        return ""
+    return _clean_text(value)
 
 
-def _extract_meta_tags(soup: BeautifulSoup) -> dict:
-    meta = {}
-    for tag in soup.find_all("meta"):
-        name = tag.get("name") or tag.get("property") or tag.get("itemprop")
-        if name:
-            meta[name] = tag.get("content", "")
-    return meta
+def _dedupe(values: list[str], limit: int | None = None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+        if limit is not None and len(result) >= limit:
+            break
+    return result
 
 
-def _extract_json_ld(soup: BeautifulSoup) -> list:
-    results = []
+def _normalize_url(value: object, base_url: str) -> str:
+    text = _coerce_text(value)
+    if not text:
+        return ""
+    return urljoin(base_url, text)
+
+
+def _normalize_urls(value: object, base_url: str, limit: int = 10) -> list[str]:
+    urls: list[str] = []
+
+    def collect(item: object) -> None:
+        if isinstance(item, dict):
+            for key in ("url", "contentUrl", "src", "image"):
+                if item.get(key):
+                    collect(item[key])
+                    return
+            return
+        if isinstance(item, list):
+            for sub_item in item:
+                collect(sub_item)
+            return
+        url = _normalize_url(item, base_url)
+        if url:
+            urls.append(url)
+
+    collect(value)
+    return _dedupe(urls, limit=limit)
+
+
+def _extract_meta_content(soup: BeautifulSoup, *names: str) -> str:
+    for name in names:
+        tag = (
+            soup.find("meta", attrs={"property": name})
+            or soup.find("meta", attrs={"name": name})
+            or soup.find("meta", attrs={"itemprop": name})
+        )
+        if tag and tag.get("content"):
+            return _clean_text(tag["content"])
+    return ""
+
+
+def _extract_from_selectors(soup: BeautifulSoup, selectors: list[str]) -> str:
+    for selector in selectors:
+        element = soup.select_one(selector)
+        if not element:
+            continue
+        value = (
+            element.get("content")
+            or element.get("value")
+            or element.get("data-old-hires")
+            or element.get("src")
+            or element.get_text(" ", strip=True)
+        )
+        text = _clean_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _extract_urls_from_selectors(
+    soup: BeautifulSoup, selectors: list[str], base_url: str, limit: int = 10
+) -> list[str]:
+    urls: list[str] = []
+    for selector in selectors:
+        for element in soup.select(selector):
+            candidate = (
+                element.get("content")
+                or element.get("data-old-hires")
+                or element.get("src")
+                or element.get("href")
+                or element.get("data-src")
+            )
+            url = _normalize_url(candidate, base_url)
+            if url:
+                urls.append(url)
+    return _dedupe(urls, limit=limit)
+
+
+def _to_float(value: object) -> float | None:
+    text = _coerce_text(value)
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _to_int(value: object) -> int | None:
+    number = _to_float(value)
+    return int(number) if number is not None else None
+
+
+def _normalize_currency(value: str) -> str:
+    mapping = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY", "₴": "UAH"}
+    token = _clean_text(value).upper()
+    return mapping.get(token, token)
+
+
+def _parse_price(price_value: object, currency_value: object = "") -> tuple[str, str]:
+    price_text = _coerce_text(price_value).replace("\xa0", " ")
+    currency = _normalize_currency(_coerce_text(currency_value)) if currency_value else ""
+    if price_text:
+        match = PRICE_PATTERN.search(price_text)
+        if match:
+            price = match.group("amount").replace(",", "")
+            token = match.group("prefix") or match.group("suffix") or ""
+            if not currency and token:
+                currency = _normalize_currency(token)
+            return price, currency
+    if price_text and re.fullmatch(r"\d[\d,.]*", price_text):
+        return price_text.replace(",", ""), currency
+    return price_text, currency
+
+
+def _strip_schema_value(value: object) -> str:
+    text = _coerce_text(value)
+    if text.startswith("http://") or text.startswith("https://"):
+        return text.rstrip("/").rsplit("/", 1)[-1]
+    return text
+
+
+def _field_confidence(method: str, present: bool, bonus: float = 0.0) -> float:
+    base = {"json-ld": 0.92, "microdata": 0.82, "dom": 0.64, "fallback": 0.45, "hybrid": 0.88}
+    if not present:
+        return 0.0
+    return round(min(0.99, base.get(method, 0.5) + bonus), 2)
+
+
+def _extract_json_ld_entities(soup: BeautifulSoup) -> list[dict]:
+    entities: list[dict] = []
+
+    def flatten(node: object) -> list[dict]:
+        if isinstance(node, list):
+            flat: list[dict] = []
+            for item in node:
+                flat.extend(flatten(item))
+            return flat
+        if not isinstance(node, dict):
+            return []
+        result = flatten(node.get("@graph", [])) if "@graph" in node else [node]
+        main_entity = node.get("mainEntity")
+        if isinstance(main_entity, (list, dict)):
+            result.extend(flatten(main_entity))
+        return result
+
     for script in soup.find_all("script", type="application/ld+json"):
+        raw = (script.string or script.get_text() or "").strip()
+        if not raw:
+            continue
+        raw = raw.removeprefix("<!--").removesuffix("-->").strip()
         try:
-            import json
-            data = json.loads(script.string)
-            if isinstance(data, list):
-                results.extend(data)
-            else:
-                results.append(data)
+            data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             continue
-    return results
+        entities.extend(flatten(data))
+
+    return [entity for entity in entities if isinstance(entity, dict)]
 
 
-def _extract_product_microdata(soup: BeautifulSoup) -> list:
-    products = []
-    for item in soup.find_all(attrs={"itemtype": re.compile(r'schema\.org/Product')}):
-        product = {}
-        for prop in ["name", "image", "description", "sku", "brand"]:
-            el = item.find(attrs={"itemprop": prop})
-            if el:
-                product[prop] = el.get_text(strip=True) or el.get("content", "")
-        offers = item.find(attrs={"itemprop": "offers"})
-        if offers:
-            price_el = offers.find(attrs={"itemprop": "price"})
-            if price_el:
-                product["price"] = price_el.get("content", "") or price_el.get_text(strip=True)
-            currency_el = offers.find(attrs={"itemprop": "priceCurrency"})
-            if currency_el:
-                product["currency"] = currency_el.get("content", "")
-            avail_el = offers.find(attrs={"itemprop": "availability"})
-            if avail_el:
-                product["availability"] = avail_el.get("content", "")
-        products.append(product)
-    return products
+def _select_best(candidates: list[dict], scorer) -> dict | None:
+    return max(candidates, key=scorer) if candidates else None
 
 
-def _extract_recipe_microdata(soup: BeautifulSoup) -> list:
-    recipes = []
-    for item in soup.find_all(attrs={"itemtype": re.compile(r'schema\.org/Recipe')}):
-        recipe = {}
-        for prop in ["name", "description", "author", "prepTime", "cookTime",
-                     "totalTime", "recipeYield", "recipeCuisine", "recipeCategory", "calories"]:
-            el = item.find(attrs={"itemprop": prop})
-            if el:
-                recipe[prop] = el.get_text(strip=True) or el.get("content", "")
-        ingredients = item.find(attrs={"itemprop": "recipeIngredient"})
-        if ingredients:
-            recipe["ingredients"] = [
-                ing.get_text(strip=True)
-                for ing in item.find_all(attrs={"itemprop": "recipeIngredient"})
-            ]
-        instructions = item.find(attrs={"itemprop": "recipeInstructions"})
-        if instructions:
-            if instructions.find_all("li"):
-                recipe["instructions"] = [
-                    li.get_text(strip=True) for li in instructions.find_all("li")
-                ]
-            else:
-                recipe["instructions"] = [instructions.get_text(strip=True)]
-        recipes.append(recipe)
-    return recipes
-
-
-# ─── Extraction Functions ─────────────────────────────────────────
+def _normalize_author(value: object) -> str:
+    if isinstance(value, list):
+        authors = [_normalize_author(item) for item in value]
+        return ", ".join([author for author in authors if author])
+    if isinstance(value, dict):
+        return _coerce_text(value.get("name") or value.get("author"))
+    return _coerce_text(value)
 
 
 async def extract_article(url: str) -> dict:
-    """Extract main article content from a URL."""
     validate_url(url)
-    async with _get_client() as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
-
+    fetched = await fetch_html(url, timeout=20.0)
+    source_url = fetched.final_url
+    html = fetched.html
     soup = BeautifulSoup(html, "html.parser")
+    json_ld = _extract_json_ld_entities(soup)
+    article_entity = next(
+        (entity for entity in json_ld if "article" in str(entity.get("@type", "")).lower()),
+        None,
+    )
+
     doc = Document(html)
+    body_html = doc.summary()
+    body_text = BeautifulSoup(body_html, "html.parser").get_text(" ", strip=True)
+    method = "json-ld" if article_entity else "fallback"
 
-    title = doc.title() or soup.find("title").get_text(strip=True) if soup.find("title") else ""
-    body = doc.summary()
+    if len(body_text) < 200:
+        fallback_node = soup.select_one("article") or soup.select_one("main") or soup.body
+        if fallback_node:
+            body_html = str(fallback_node)
+            body_text = fallback_node.get_text(" ", strip=True)
+        method = "fallback"
 
-    author = ""
-    author_meta = soup.find("meta", attrs={"name": "author"})
-    if author_meta:
-        author = author_meta.get("content", "")
-    else:
-        author_el = soup.find(attrs={"itemprop": "author"})
-        if author_el:
-            author = author_el.get_text(strip=True)
+    title = (
+        _coerce_text((article_entity or {}).get("headline") or (article_entity or {}).get("name"))
+        or _extract_meta_content(soup, "og:title", "twitter:title")
+        or _clean_text(doc.title())
+        or _extract_from_selectors(soup, ["article h1", "main h1", "h1"])
+        or _clean_text(soup.title.string if soup.title and soup.title.string else "")
+    )
+    author = (
+        _normalize_author((article_entity or {}).get("author"))
+        or _extract_meta_content(soup, "author", "article:author")
+        or _extract_from_selectors(soup, ["[itemprop='author']", "[rel='author']", ".author", ".byline"])
+    )
+    date = (
+        _coerce_text((article_entity or {}).get("datePublished") or (article_entity or {}).get("dateModified"))
+        or _extract_meta_content(soup, "article:published_time", "article:modified_time", "datePublished")
+        or _extract_from_selectors(soup, ["time", "[itemprop='datePublished']"])
+    )
+    images = _normalize_urls((article_entity or {}).get("image"), source_url, limit=10)
+    images = _dedupe(
+        images
+        + _extract_urls_from_selectors(BeautifulSoup(body_html, "html.parser"), ["img"], source_url, limit=20)
+        + _normalize_urls(_extract_meta_content(soup, "og:image"), source_url),
+        limit=20,
+    )
 
-    date = ""
-    date_el = soup.find("time")
-    if date_el:
-        date = date_el.get("datetime", "") or date_el.get_text(strip=True)
-    else:
-        date_meta = soup.find("meta", attrs={"property": "article:published_time"})
-        if date_meta:
-            date = date_meta.get("content", "")
-
-    images = []
-    for img in soup.find_all("img", src=True):
-        src = img["src"]
-        if src.startswith("http"):
-            images.append(src)
-        elif src.startswith("//"):
-            images.append(f"https:{src}")
-        elif src.startswith("/"):
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            images.append(f"{parsed.scheme}://{parsed.netloc}{src}")
-    images = images[:20]
-
-    body_text = BeautifulSoup(body, "html.parser").get_text()
-    word_count = len(body_text.split())
-    language = soup.find("html").get("lang", "") if soup.find("html") else ""
-
-    return {
+    result = {
         "title": title,
         "author": author,
         "date": date,
-        "body": body[:10000],
+        "body": body_html[:15000],
         "images": images,
-        "word_count": word_count,
-        "language": language,
-        "source_url": url,
-        "confidence": {"title": 0.9, "body": 0.85, "author": 0.7 if author else 0.0},
+        "word_count": len(body_text.split()),
+        "language": soup.find("html").get("lang", "").strip() if soup.find("html") else "",
+        "source_url": source_url,
     }
+    result["confidence"] = {
+        "title": _field_confidence(method, bool(result["title"]), 0.03),
+        "body": _field_confidence(method, bool(result["body"]), 0.01),
+        "author": _field_confidence(method, bool(result["author"])),
+        "date": _field_confidence(method, bool(result["date"])),
+    }
+    return result
+
+
+def _normalize_phone(phone: str) -> str:
+    digits = re.sub(r"[^\d+]", "", phone)
+    if digits.startswith("00"):
+        digits = f"+{digits[2:]}"
+    if digits and not digits.startswith("+") and len(re.sub(r"\D", "", digits)) >= 10:
+        digits = f"+{digits}"
+    return digits or phone.strip()
+
+
+def _postal_address(value: object) -> str:
+    if isinstance(value, dict):
+        parts = [
+            _coerce_text(value.get("streetAddress")),
+            _coerce_text(value.get("addressLocality")),
+            _coerce_text(value.get("addressRegion")),
+            _coerce_text(value.get("postalCode")),
+            _coerce_text(value.get("addressCountry")),
+        ]
+        return ", ".join([part for part in parts if part])
+    if isinstance(value, list):
+        return " | ".join([_postal_address(item) for item in value if _postal_address(item)])
+    return _coerce_text(value)
 
 
 async def extract_contact(url: str) -> dict:
-    """Extract contact information from a URL."""
     validate_url(url)
-    async with _get_client() as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
+    fetched = await fetch_html(url, timeout=20.0)
+    source_url = fetched.final_url
+    soup = BeautifulSoup(fetched.html, "html.parser")
+    json_ld = _extract_json_ld_entities(soup)
+    text = soup.get_text(" ", strip=True)
 
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text()
+    emails = {email.lower() for email in EMAIL_PATTERN.findall(text)}
+    phones: set[str] = set()
+    addresses: list[str] = []
 
-    emails = list(set(re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)))[:10]
+    for link in soup.find_all("a", href=True):
+        href = link["href"].strip()
+        if href.startswith("mailto:"):
+            emails.add(href.split(":", 1)[1].split("?", 1)[0].lower())
+        elif href.startswith("tel:"):
+            phones.add(_normalize_phone(href.split(":", 1)[1]))
 
-    phone_patterns = [
-        r'\+?1?\s*\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}',
-        r'\+\d{1,3}[\s.-]?\d{3,}[\s.-]?\d{3,}[\s.-]?\d{4,}',
-    ]
-    phones = []
-    for pattern in phone_patterns:
-        phones.extend(re.findall(pattern, text))
-    phones = list(set(phones))[:10]
+    for raw_phone in PHONE_PATTERN.findall(text):
+        normalized = _normalize_phone(raw_phone)
+        if len(re.sub(r"\D", "", normalized)) >= 8:
+            phones.add(normalized)
 
-    addresses = []
-    for meta in soup.find_all("meta", attrs={"itemprop": "address"}):
-        content = meta.get("content", "")
-        if content:
-            addresses.append(content)
-    for el in soup.find_all(attrs={"itemprop": "streetAddress"}):
-        content = el.get_text(strip=True)
-        if content:
-            addresses.append(content)
-    addresses = addresses[:5]
+    for entity in json_ld:
+        entity_type = str(entity.get("@type", "")).lower()
+        if "organization" in entity_type or "business" in entity_type:
+            address = _postal_address(entity.get("address"))
+            if address:
+                addresses.append(address)
+            if entity.get("email"):
+                emails.add(_coerce_text(entity["email"]).lower())
+            if entity.get("telephone"):
+                phones.add(_normalize_phone(_coerce_text(entity["telephone"])))
 
-    social_links = {}
-    social_domains = ["facebook.com", "twitter.com", "x.com", "linkedin.com",
-                      "instagram.com", "youtube.com", "tiktok.com", "github.com"]
+    for element in soup.find_all(attrs={"itemprop": re.compile(r"(streetAddress|address)", re.I)}):
+        text_value = _clean_text(element.get("content") or element.get_text(" ", strip=True))
+        if text_value:
+            addresses.append(text_value)
+
+    for address_tag in soup.find_all("address"):
+        text_value = _clean_text(address_tag.get_text(" ", strip=True))
+        if text_value:
+            addresses.append(text_value)
+
+    social_links: dict[str, str] = {}
     for link in soup.find_all("a", href=True):
         href = link["href"]
-        for domain in social_domains:
-            if domain in href:
-                social_links[domain.split(".")[0]] = href
+        for domain, label in SOCIAL_DOMAINS.items():
+            if domain in href and label not in social_links:
+                social_links[label] = href
                 break
-    social_links = dict(list(social_links.items())[:10])
+
+    emails_list = _dedupe(sorted(emails), limit=10)
+    phones_list = _dedupe(sorted(phones), limit=10)
+    addresses_list = _dedupe(addresses, limit=5)
 
     return {
-        "emails": emails,
-        "phones": phones,
-        "addresses": addresses,
+        "emails": emails_list,
+        "phones": phones_list,
+        "addresses": addresses_list,
         "social_links": social_links,
-        "source_url": url,
+        "source_url": source_url,
         "confidence": {
-            "emails": 0.95 if emails else 0.0,
-            "phones": 0.85 if phones else 0.0,
-            "social": 0.9 if social_links else 0.0,
+            "emails": _field_confidence("hybrid", bool(emails_list), 0.03),
+            "phones": _field_confidence("hybrid", bool(phones_list), 0.01),
+            "addresses": _field_confidence("hybrid", bool(addresses_list)),
+            "social": _field_confidence("hybrid", bool(social_links), 0.02),
         },
     }
 
 
-async def extract_product(url: str) -> dict:
-    """Extract product information from an e-commerce page."""
-    validate_url(url)
-    async with _get_client() as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
+PRODUCT_NAME_SELECTORS = [
+    "meta[property='og:title']",
+    "meta[name='twitter:title']",
+    "#productTitle",
+    "[data-testid='product-title']",
+    "[itemprop='name']",
+    "main h1",
+    "h1",
+]
+PRODUCT_PRICE_SELECTORS = [
+    "meta[property='product:price:amount']",
+    "meta[property='og:price:amount']",
+    "[itemprop='price']",
+    "#priceblock_ourprice",
+    "#priceblock_dealprice",
+    ".a-price .a-offscreen",
+    "[data-testid='price']",
+    ".product-price",
+    ".price",
+    ".sale-price",
+]
+PRODUCT_IMAGE_SELECTORS = [
+    "meta[property='og:image']",
+    "[itemprop='image']",
+    "#landingImage",
+    "#imgTagWrapperId img",
+    "[data-testid*='product-image'] img",
+    ".product__image img",
+    "main img",
+]
 
-    soup = BeautifulSoup(html, "html.parser")
 
-    product = {}
-    json_ld_items = _extract_json_ld(soup)
-    for item in json_ld_items:
-        if item.get("@type") == "Product" or "Product" in str(item.get("@type", "")):
-            product = item
-            break
+def _product_confidence(result: dict, method: str) -> dict:
+    return {
+        "name": _field_confidence(method, bool(result["name"]), 0.02),
+        "price": _field_confidence(method, bool(result["price"]), 0.02),
+        "images": _field_confidence(method, bool(result["images"])),
+        "brand": _field_confidence(method, bool(result["brand"])),
+    }
 
-    if product:
-        name = product.get("name", "")
-        if isinstance(name, list):
-            name = name[0] if name else ""
 
-        offers = product.get("offers", {})
-        if isinstance(offers, list):
-            offers = offers[0] if offers else {}
+def _normalize_product_candidate(candidate: dict, base_url: str, method: str) -> dict:
+    offers = candidate.get("offers")
+    if isinstance(offers, list):
+        offers = next((offer for offer in offers if isinstance(offer, dict)), {})
+    if not isinstance(offers, dict):
+        offers = {}
 
-        price = str(offers.get("price", ""))
-        currency = offers.get("priceCurrency", "")
-        availability = offers.get("availability", "")
+    aggregate_rating = candidate.get("aggregateRating")
+    if isinstance(aggregate_rating, list):
+        aggregate_rating = next((item for item in aggregate_rating if isinstance(item, dict)), {})
+    if not isinstance(aggregate_rating, dict):
+        aggregate_rating = {}
 
-        brand = product.get("brand", "")
-        if isinstance(brand, dict):
-            brand = brand.get("name", "")
+    brand = candidate.get("brand")
+    if isinstance(brand, dict):
+        brand = brand.get("name") or brand.get("brand")
 
-        rating = None
-        review_count = None
-        agg_rating = product.get("aggregateRating", {})
-        if isinstance(agg_rating, dict):
-            try:
-                rating = float(agg_rating.get("ratingValue", 0))
-                review_count = int(agg_rating.get("ratingCount", 0))
-            except (ValueError, TypeError):
-                pass
+    price, currency = _parse_price(
+        offers.get("price") or candidate.get("price"),
+        offers.get("priceCurrency") or candidate.get("priceCurrency") or candidate.get("currency"),
+    )
 
-        images = product.get("image", [])
-        if isinstance(images, str):
-            images = [images]
+    result = {
+        "name": _coerce_text(candidate.get("name")),
+        "price": price,
+        "currency": currency,
+        "description": _coerce_text(candidate.get("description")),
+        "images": _normalize_urls(candidate.get("image") or candidate.get("images"), base_url, limit=10),
+        "sku": _coerce_text(candidate.get("sku")),
+        "brand": _coerce_text(brand),
+        "availability": _strip_schema_value(offers.get("availability") or candidate.get("availability")),
+        "rating": _to_float(aggregate_rating.get("ratingValue") or candidate.get("rating")),
+        "review_count": _to_int(
+            aggregate_rating.get("ratingCount")
+            or aggregate_rating.get("reviewCount")
+            or candidate.get("review_count")
+            or candidate.get("reviewCount")
+        ),
+        "source_url": base_url,
+        "extraction_method": method,
+    }
+    result["confidence"] = _product_confidence(result, method)
+    return result
 
-        result = {
-            "name": name,
-            "price": price,
-            "currency": currency,
-            "description": product.get("description", ""),
-            "images": images[:10],
-            "sku": product.get("sku", ""),
-            "brand": brand,
-            "availability": availability,
-            "rating": rating,
-            "review_count": review_count,
-            "source_url": url,
-            "extraction_method": "json-ld",
-            "confidence": {
-                "name": 0.95 if name else 0.0,
-                "price": 0.9 if price else 0.0,
-            },
-        }
 
-        if name or price:
-            return result
+def _extract_product_microdata(soup: BeautifulSoup, base_url: str) -> list[dict]:
+    products: list[dict] = []
+    for item in soup.find_all(attrs={"itemtype": re.compile(r"schema\.org/Product", re.I)}):
+        product: dict = {}
+        for prop in ("name", "description", "sku", "brand", "image"):
+            element = item.find(attrs={"itemprop": prop})
+            if element:
+                product[prop] = (
+                    element.get("content")
+                    or element.get("href")
+                    or element.get("src")
+                    or element.get_text(" ", strip=True)
+                )
+        offers = item.find(attrs={"itemprop": "offers"})
+        if offers:
+            product["offers"] = {}
+            for prop in ("price", "priceCurrency", "availability"):
+                element = offers.find(attrs={"itemprop": prop})
+                if element:
+                    product["offers"][prop] = (
+                        element.get("content")
+                        or element.get("href")
+                        or element.get_text(" ", strip=True)
+                    )
+        products.append(_normalize_product_candidate(product, base_url, "microdata"))
+    return products
 
-    microdata_products = _extract_product_microdata(soup)
-    if microdata_products:
-        p = microdata_products[0]
-        return {
-            "name": p.get("name", ""),
-            "price": p.get("price", ""),
-            "currency": p.get("currency", ""),
-            "description": p.get("description", ""),
-            "images": [p["image"]] if p.get("image") else [],
-            "sku": p.get("sku", ""),
-            "brand": p.get("brand", ""),
-            "availability": p.get("availability", ""),
+
+def _score_product(candidate: dict) -> int:
+    score = 0
+    score += 5 if candidate.get("name") else 0
+    score += 5 if candidate.get("price") else 0
+    score += 2 if candidate.get("currency") else 0
+    score += 2 if candidate.get("images") else 0
+    score += 1 if candidate.get("brand") else 0
+    score += 1 if candidate.get("availability") else 0
+    score += 1 if candidate.get("description") else 0
+    score += 1 if candidate.get("rating") is not None else 0
+    score += 1 if candidate.get("review_count") is not None else 0
+    return score
+
+
+def _extract_product_dom(soup: BeautifulSoup, base_url: str) -> dict:
+    price, currency = _parse_price(
+        _extract_from_selectors(soup, PRODUCT_PRICE_SELECTORS),
+        _extract_meta_content(soup, "product:price:currency", "og:price:currency"),
+    )
+    result = {
+        "name": _extract_from_selectors(soup, PRODUCT_NAME_SELECTORS),
+        "price": price,
+        "currency": currency,
+        "description": _extract_from_selectors(
+            soup,
+            ["meta[name='description']", "[itemprop='description']", "#productDescription", ".product-description"],
+        ),
+        "images": _extract_urls_from_selectors(soup, PRODUCT_IMAGE_SELECTORS, base_url),
+        "sku": _extract_meta_content(soup, "sku"),
+        "brand": _extract_from_selectors(soup, ["meta[name='brand']", "[itemprop='brand']", "#bylineInfo", ".brand"]),
+        "availability": _strip_schema_value(
+            _extract_from_selectors(soup, ["meta[property='product:availability']", "[itemprop='availability']", "#availability", ".availability"])
+        ),
+        "rating": _to_float(_extract_from_selectors(soup, ["[itemprop='ratingValue']", "span.a-icon-alt", ".rating-value"])),
+        "review_count": _to_int(_extract_from_selectors(soup, ["[itemprop='ratingCount']", "[itemprop='reviewCount']", "#acrCustomerReviewText", ".review-count"])),
+        "source_url": base_url,
+        "extraction_method": "dom",
+    }
+    result["confidence"] = _product_confidence(result, "dom")
+    return result
+
+
+def _merge_product(primary: dict | None, secondary: dict | None) -> dict:
+    merged = (primary or secondary or {}).copy()
+    if primary and secondary:
+        for field in ("name", "price", "currency", "description", "sku", "brand", "availability"):
+            if not merged.get(field) and secondary.get(field):
+                merged[field] = secondary[field]
+        if merged.get("rating") is None and secondary.get("rating") is not None:
+            merged["rating"] = secondary["rating"]
+        if merged.get("review_count") is None and secondary.get("review_count") is not None:
+            merged["review_count"] = secondary["review_count"]
+        merged["images"] = _dedupe((merged.get("images") or []) + (secondary.get("images") or []), limit=10)
+        if _score_product(merged) > _score_product(primary):
+            merged["extraction_method"] = (
+                primary.get("extraction_method")
+                if primary.get("extraction_method") == secondary.get("extraction_method")
+                else "hybrid"
+            )
+    if not merged:
+        merged = {
+            "name": "",
+            "price": "",
+            "currency": "",
+            "description": "",
+            "images": [],
+            "sku": "",
+            "brand": "",
+            "availability": "",
             "rating": None,
             "review_count": None,
-            "source_url": url,
-            "extraction_method": "microdata",
-            "confidence": {
-                "name": 0.85 if p.get("name") else 0.0,
-                "price": 0.8 if p.get("price") else 0.0,
-            },
+            "source_url": "",
+            "extraction_method": "fallback",
         }
+    merged["confidence"] = _product_confidence(merged, merged.get("extraction_method", "fallback"))
+    return merged
 
-    title = soup.find("title").get_text(strip=True) if soup.find("title") else ""
-    og_title = ""
-    og_price = ""
-    for meta in soup.find_all("meta"):
-        prop = meta.get("property", "")
-        if prop == "og:title":
-            og_title = meta.get("content", "")
-        elif prop == "product:price:amount":
-            og_price = meta.get("content", "")
 
+async def extract_product(url: str) -> dict:
+    validate_url(url)
+    fetched = await fetch_html(url, timeout=20.0)
+    source_url = fetched.final_url
+    soup = BeautifulSoup(fetched.html, "html.parser")
+
+    json_ld_candidates = [
+        _normalize_product_candidate(entity, source_url, "json-ld")
+        for entity in _extract_json_ld_entities(soup)
+        if "product" in str(entity.get("@type", "")).lower()
+    ]
+    microdata_candidates = _extract_product_microdata(soup, source_url)
+    dom_candidate = _extract_product_dom(soup, source_url)
+    structured = _select_best(json_ld_candidates + microdata_candidates, _score_product)
+    merged = _merge_product(structured, dom_candidate)
+    merged["source_url"] = source_url
+    return merged
+
+
+RECIPE_NAME_SELECTORS = ["meta[property='og:title']", "[itemprop='name']", "article h1", "main h1", "h1"]
+RECIPE_IMAGE_SELECTORS = ["meta[property='og:image']", "[itemprop='image']", ".recipe-image img", "article img"]
+
+
+def _extract_recipe_steps(value: object) -> list[str]:
+    steps: list[str] = []
+
+    def collect(item: object) -> None:
+        if isinstance(item, list):
+            for sub_item in item:
+                collect(sub_item)
+            return
+        if isinstance(item, dict):
+            if item.get("@type") == "HowToSection":
+                collect(item.get("itemListElement"))
+                return
+            text = _coerce_text(item.get("text") or item.get("name"))
+            if text:
+                steps.append(text)
+            else:
+                collect(item.get("itemListElement"))
+            return
+        text = _coerce_text(item)
+        if text:
+            steps.append(text)
+
+    collect(value)
+    return _dedupe(steps, limit=30)
+
+
+def _recipe_confidence(result: dict, method: str) -> dict:
     return {
-        "name": og_title or title,
-        "price": og_price,
-        "currency": "",
-        "description": "",
-        "images": [],
-        "sku": "",
-        "brand": "",
-        "availability": "",
-        "rating": None,
-        "review_count": None,
-        "source_url": url,
-        "extraction_method": "fallback",
-        "confidence": {"name": 0.4, "price": 0.3 if og_price else 0.0},
+        "name": _field_confidence(method, bool(result["name"]), 0.02),
+        "ingredients": _field_confidence(method, bool(result["ingredients"]), 0.02),
+        "instructions": _field_confidence(method, bool(result["instructions"]), 0.01),
     }
+
+
+def _normalize_recipe_candidate(candidate: dict, base_url: str, method: str) -> dict:
+    nutrition = candidate.get("nutrition") if isinstance(candidate.get("nutrition"), dict) else {}
+    aggregate_rating = candidate.get("aggregateRating")
+    if isinstance(aggregate_rating, list):
+        aggregate_rating = next((item for item in aggregate_rating if isinstance(item, dict)), {})
+    if not isinstance(aggregate_rating, dict):
+        aggregate_rating = {}
+    ingredients = candidate.get("recipeIngredient") or candidate.get("ingredients") or []
+    if isinstance(ingredients, str):
+        ingredients = [ingredients]
+
+    result = {
+        "name": _coerce_text(candidate.get("name")),
+        "description": _coerce_text(candidate.get("description")),
+        "author": _normalize_author(candidate.get("author")),
+        "prep_time": _coerce_text(candidate.get("prepTime")),
+        "cook_time": _coerce_text(candidate.get("cookTime")),
+        "total_time": _coerce_text(candidate.get("totalTime")),
+        "servings": _coerce_text(candidate.get("recipeYield")),
+        "ingredients": _dedupe([_coerce_text(item) for item in ingredients], limit=50),
+        "instructions": _extract_recipe_steps(candidate.get("recipeInstructions")),
+        "images": _normalize_urls(candidate.get("image"), base_url, limit=10),
+        "cuisine": _coerce_text(candidate.get("recipeCuisine")),
+        "category": _coerce_text(candidate.get("recipeCategory")),
+        "calories": _coerce_text(nutrition.get("calories") or candidate.get("calories")),
+        "rating": _to_float(aggregate_rating.get("ratingValue") or candidate.get("rating")),
+        "review_count": _to_int(aggregate_rating.get("ratingCount") or aggregate_rating.get("reviewCount") or candidate.get("reviewCount")),
+        "source_url": base_url,
+        "extraction_method": method,
+    }
+    result["confidence"] = _recipe_confidence(result, method)
+    return result
+
+
+def _extract_recipe_microdata(soup: BeautifulSoup, base_url: str) -> list[dict]:
+    recipes: list[dict] = []
+    for item in soup.find_all(attrs={"itemtype": re.compile(r"schema\.org/Recipe", re.I)}):
+        recipe: dict = {}
+        for prop in ("name", "description", "author", "prepTime", "cookTime", "totalTime", "recipeYield", "recipeCuisine", "recipeCategory"):
+            element = item.find(attrs={"itemprop": prop})
+            if element:
+                recipe[prop] = element.get("content") or element.get("datetime") or element.get_text(" ", strip=True)
+        recipe["recipeIngredient"] = [
+            element.get("content") or element.get_text(" ", strip=True)
+            for element in item.find_all(attrs={"itemprop": "recipeIngredient"})
+        ]
+        recipe["recipeInstructions"] = [
+            element.get_text(" ", strip=True)
+            for element in item.find_all(attrs={"itemprop": "recipeInstructions"})
+        ]
+        recipes.append(_normalize_recipe_candidate(recipe, base_url, "microdata"))
+    return recipes
+
+
+def _extract_recipe_dom(soup: BeautifulSoup, base_url: str) -> dict:
+    result = {
+        "name": _extract_from_selectors(soup, RECIPE_NAME_SELECTORS),
+        "description": _extract_from_selectors(soup, ["meta[name='description']", "[itemprop='description']", ".recipe-summary"]),
+        "author": _extract_from_selectors(soup, ["[itemprop='author']", ".author", ".byline"]),
+        "prep_time": _extract_from_selectors(soup, ["[itemprop='prepTime']"]),
+        "cook_time": _extract_from_selectors(soup, ["[itemprop='cookTime']"]),
+        "total_time": _extract_from_selectors(soup, ["[itemprop='totalTime']"]),
+        "servings": _extract_from_selectors(soup, ["[itemprop='recipeYield']", ".recipe-yield"]),
+        "ingredients": _dedupe(
+            [
+                _clean_text(element.get("content") or element.get_text(" ", strip=True))
+                for selector in ("[itemprop='recipeIngredient']", ".recipe-ingredients li", ".ingredients li")
+                for element in soup.select(selector)
+            ],
+            limit=50,
+        ),
+        "instructions": _dedupe(
+            [
+                _clean_text(element.get_text(" ", strip=True))
+                for selector in ("[itemprop='recipeInstructions'] li", ".recipe-instructions li", ".instructions li", "ol li")
+                for element in soup.select(selector)
+            ],
+            limit=30,
+        ),
+        "images": _extract_urls_from_selectors(soup, RECIPE_IMAGE_SELECTORS, base_url),
+        "cuisine": _extract_from_selectors(soup, ["[itemprop='recipeCuisine']"]),
+        "category": _extract_from_selectors(soup, ["[itemprop='recipeCategory']"]),
+        "calories": _extract_from_selectors(soup, ["[itemprop='calories']"]),
+        "rating": _to_float(_extract_from_selectors(soup, ["[itemprop='ratingValue']", ".rating-value"])),
+        "review_count": _to_int(_extract_from_selectors(soup, ["[itemprop='ratingCount']", "[itemprop='reviewCount']"])),
+        "source_url": base_url,
+        "extraction_method": "dom",
+    }
+    result["confidence"] = _recipe_confidence(result, "dom")
+    return result
+
+
+def _score_recipe(candidate: dict) -> int:
+    score = 0
+    score += 5 if candidate.get("name") else 0
+    score += 4 if candidate.get("ingredients") else 0
+    score += 4 if candidate.get("instructions") else 0
+    score += 2 if candidate.get("images") else 0
+    score += 1 if candidate.get("description") else 0
+    score += 1 if candidate.get("total_time") else 0
+    return score
+
+
+def _merge_recipe(primary: dict | None, secondary: dict | None) -> dict:
+    merged = (primary or secondary or {}).copy()
+    if primary and secondary:
+        for field in ("name", "description", "author", "prep_time", "cook_time", "total_time", "servings", "cuisine", "category", "calories"):
+            if not merged.get(field) and secondary.get(field):
+                merged[field] = secondary[field]
+        if merged.get("rating") is None and secondary.get("rating") is not None:
+            merged["rating"] = secondary["rating"]
+        if merged.get("review_count") is None and secondary.get("review_count") is not None:
+            merged["review_count"] = secondary["review_count"]
+        merged["ingredients"] = _dedupe((merged.get("ingredients") or []) + (secondary.get("ingredients") or []), limit=50)
+        merged["instructions"] = _dedupe((merged.get("instructions") or []) + (secondary.get("instructions") or []), limit=30)
+        merged["images"] = _dedupe((merged.get("images") or []) + (secondary.get("images") or []), limit=10)
+        if _score_recipe(merged) > _score_recipe(primary):
+            merged["extraction_method"] = (
+                primary.get("extraction_method")
+                if primary.get("extraction_method") == secondary.get("extraction_method")
+                else "hybrid"
+            )
+    if not merged:
+        merged = {
+            "name": "",
+            "description": "",
+            "author": "",
+            "prep_time": "",
+            "cook_time": "",
+            "total_time": "",
+            "servings": "",
+            "ingredients": [],
+            "instructions": [],
+            "images": [],
+            "cuisine": "",
+            "category": "",
+            "calories": "",
+            "rating": None,
+            "review_count": None,
+            "source_url": "",
+            "extraction_method": "fallback",
+        }
+    merged["confidence"] = _recipe_confidence(merged, merged.get("extraction_method", "fallback"))
+    return merged
 
 
 async def extract_recipe(url: str) -> dict:
-    """Extract recipe information from a cooking page."""
     validate_url(url)
-    async with _get_client() as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        html = response.text
+    fetched = await fetch_html(url, timeout=20.0)
+    source_url = fetched.final_url
+    soup = BeautifulSoup(fetched.html, "html.parser")
 
-    soup = BeautifulSoup(html, "html.parser")
-
-    recipe = {}
-    json_ld_items = _extract_json_ld(soup)
-    for item in json_ld_items:
-        if item.get("@type") == "Recipe" or "Recipe" in str(item.get("@type", "")):
-            recipe = item
-            break
-
-    if recipe:
-        name = recipe.get("name", "")
-        if isinstance(name, list):
-            name = name[0] if name else ""
-
-        ingredients = recipe.get("recipeIngredient", recipe.get("ingredients", []))
-        if isinstance(ingredients, str):
-            ingredients = [ingredients]
-
-        instructions_raw = recipe.get("recipeInstructions", [])
-        if isinstance(instructions_raw, str):
-            instructions = [instructions_raw]
-        elif isinstance(instructions_raw, list):
-            instructions = []
-            for step in instructions_raw:
-                if isinstance(step, dict):
-                    instructions.append(step.get("text", step.get("name", "")))
-                elif isinstance(step, str):
-                    instructions.append(step)
-        else:
-            instructions = []
-
-        nutrition = recipe.get("nutrition", {})
-        if isinstance(nutrition, dict):
-            calories = nutrition.get("calories", "")
-        else:
-            calories = ""
-
-        rating = None
-        review_count = None
-        agg_rating = recipe.get("aggregateRating", {})
-        if isinstance(agg_rating, dict):
-            try:
-                rating = float(agg_rating.get("ratingValue", 0))
-                review_count = int(agg_rating.get("ratingCount", 0))
-            except (ValueError, TypeError):
-                pass
-
-        images = recipe.get("image", [])
-        if isinstance(images, str):
-            images = [images]
-
-        return {
-            "name": name,
-            "description": recipe.get("description", ""),
-            "author": recipe.get("author", {}).get("name", "") if isinstance(recipe.get("author"), dict) else str(recipe.get("author", "")),
-            "prep_time": recipe.get("prepTime", ""),
-            "cook_time": recipe.get("cookTime", ""),
-            "total_time": recipe.get("totalTime", ""),
-            "servings": str(recipe.get("recipeYield", "")),
-            "ingredients": ingredients[:50],
-            "instructions": instructions[:20],
-            "images": images[:10],
-            "cuisine": recipe.get("recipeCuisine", ""),
-            "category": recipe.get("recipeCategory", ""),
-            "calories": str(calories),
-            "rating": rating,
-            "review_count": review_count,
-            "source_url": url,
-            "extraction_method": "json-ld",
-            "confidence": {
-                "name": 0.95 if name else 0.0,
-                "ingredients": 0.9 if ingredients else 0.0,
-            },
-        }
-
-    microdata_recipes = _extract_recipe_microdata(soup)
-    if microdata_recipes:
-        r = microdata_recipes[0]
-        return {
-            "name": r.get("name", ""),
-            "description": r.get("description", ""),
-            "author": r.get("author", ""),
-            "prep_time": r.get("prepTime", ""),
-            "cook_time": r.get("cookTime", ""),
-            "total_time": r.get("totalTime", ""),
-            "servings": r.get("recipeYield", ""),
-            "ingredients": r.get("ingredients", [])[:50],
-            "instructions": r.get("instructions", [])[:20],
-            "images": [],
-            "cuisine": r.get("recipeCuisine", ""),
-            "category": r.get("recipeCategory", ""),
-            "calories": r.get("calories", ""),
-            "rating": None,
-            "review_count": None,
-            "source_url": url,
-            "extraction_method": "microdata",
-            "confidence": {
-                "name": 0.85 if r.get("name") else 0.0,
-                "ingredients": 0.8 if r.get("ingredients") else 0.0,
-            },
-        }
-
-    title = soup.find("title").get_text(strip=True) if soup.find("title") else ""
-    return {
-        "name": title,
-        "description": "",
-        "author": "",
-        "prep_time": "",
-        "cook_time": "",
-        "total_time": "",
-        "servings": "",
-        "ingredients": [],
-        "instructions": [],
-        "images": [],
-        "cuisine": "",
-        "category": "",
-        "calories": "",
-        "rating": None,
-        "review_count": None,
-        "source_url": url,
-        "extraction_method": "fallback",
-        "confidence": {"name": 0.3, "ingredients": 0.0},
-    }
+    json_ld_candidates = [
+        _normalize_recipe_candidate(entity, source_url, "json-ld")
+        for entity in _extract_json_ld_entities(soup)
+        if "recipe" in str(entity.get("@type", "")).lower()
+    ]
+    microdata_candidates = _extract_recipe_microdata(soup, source_url)
+    dom_candidate = _extract_recipe_dom(soup, source_url)
+    structured = _select_best(json_ld_candidates + microdata_candidates, _score_recipe)
+    merged = _merge_recipe(structured, dom_candidate)
+    merged["source_url"] = source_url
+    return merged

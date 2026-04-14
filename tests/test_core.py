@@ -1,5 +1,11 @@
+import socket
+
 import pytest
-from httpx import AsyncClient, ASGITransport
+from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
+
+from core.models import PdfFromHtmlRequest
+from core.ssrf import validate_url
 from main import app
 
 
@@ -51,10 +57,7 @@ async def test_auth_required_tools(client):
 
 @pytest.mark.asyncio
 async def test_auth_success(client):
-    response = await client.get(
-        "/health",
-        headers={"X-API-Key": "dev-api-key-change-me"},
-    )
+    response = await client.get("/health", headers={"X-API-Key": "dev-api-key-change-me"})
     assert response.status_code == 200
 
 
@@ -72,3 +75,20 @@ async def test_openapi_schema(client):
     assert "paths" in schema
     for path in schema["paths"]:
         assert path.startswith("/v1/") or path in ("/health", "/ready", "/")
+
+
+def test_ssrf_rejects_any_private_resolution(monkeypatch):
+    def fake_getaddrinfo(host, port, type=0):
+        return [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port)),
+        ]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(Exception):
+        validate_url("https://example.com")
+
+
+def test_pdf_margin_validation():
+    with pytest.raises(ValidationError):
+        PdfFromHtmlRequest(html="<p>Hello</p>", margin_top="12")

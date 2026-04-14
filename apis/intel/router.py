@@ -1,7 +1,7 @@
-import httpx
 from fastapi import APIRouter, HTTPException
-from .service import full_audit, _check_security_headers, _detect_tech_stack, _get_client
+from .service import full_audit, _check_security_headers, _detect_tech_stack
 from bs4 import BeautifulSoup
+from core.fetch import fetch_html
 from core.models import (
     IntelAuditRequest,
     IntelAuditResponse,
@@ -37,9 +37,8 @@ async def api_full_audit(request: IntelAuditRequest):
 async def api_security_headers(request: IntelAuditRequest):
     try:
         validate_url(request.url)
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            response = await client.get(request.url)
-            headers = dict(response.headers)
+        fetched = await fetch_html(request.url, timeout=15.0)
+        headers = fetched.headers
         result = _check_security_headers(headers)
         return SecurityHeaders(**result)
     except HTTPException:
@@ -56,13 +55,12 @@ async def api_security_headers(request: IntelAuditRequest):
 async def api_techstack(request: IntelAuditRequest):
     try:
         validate_url(request.url)
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            response = await client.get(request.url)
-            headers = dict(response.headers)
-            html = response.text
+        fetched = await fetch_html(request.url, timeout=15.0)
+        headers = fetched.headers
+        html = fetched.html
         soup = BeautifulSoup(html, "html.parser")
         technologies = _detect_tech_stack(soup, headers, html)
-        return {"technologies": technologies, "source_url": request.url}
+        return {"technologies": technologies, "source_url": fetched.final_url}
     except HTTPException:
         raise
     except Exception:
